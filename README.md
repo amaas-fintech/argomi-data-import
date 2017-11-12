@@ -1,8 +1,8 @@
-# argomi-upload
+# argomi-data-import
 
 Serverless sample of consuming Argomi APIs. This sample uploads CSV data into Argomi. A Step Functions state machine
 is triggered whenever files are uploaded to a monitored S3 Bucket
-![Upload state machine](https://github.com/paul-rs/argomi-upload/blob/master/state_machine.png?raw=true "Argomi Upload State Machine")
+![Upload state machine](https://github.com/paul-rs/argomi-upload/blob/master/state_machine.png =250x500)
 
 ## Deploying using Cloudformation
 

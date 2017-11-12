@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cloudformation template for deploying a serverless state machine that uploads data into Argomi."
+Parameters:
+  # NOTE: USE OF AWS KMS IS RECOMMENDED
+  Environment:
+    Description: Argomi environment [dev/staging/prod]
+    Type: String
+  ArgomiUsername:
+    Description: username/email login of your Argomi API account
+    Type: String
+  ArgomiPassword:
+    Description: Password for your Argomi API account
+    Type: String
+  UploadBucketName:
+    Description: S3 Bucket name for upload files
+    Type: String
+    Default: argomi-import
+  OutputBucketName:
+    Description: S3 Bucket name for output files
+    Type: String
+    Default: argomi-export
+  DeploymentBucketName:
+    Description: S3 Bucket name where lambda packages are deployed
+    Type: String
+    Default: argomi-upload-deployment
+  ExecuteLambdaS3Key:
+    Description: S3 Key of the .zip deployment package of the Execute lambda
+    Type: String
+  InitializeLambdaS3Key:
+    Description: S3 Key of the .zip deployment package of the Initialize lambda
+    Type: String
+  ImportLambdaS3Key:
+    Description: S3 Key of the .zip deployment package of the Import lambda
+    Type: String
+  ExportLambdaS3Key:
+    Description: S3 Key of the .zip deployment package of the Export lambda
+    Type: String
+
+Resources:
+
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: UploadBucketPermission
+    Properties:
+      BucketName: !Ref UploadBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+        - Event: 's3:ObjectCreated:*'
+          Function: !GetAtt ExecuteLambda.Arn
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref OutputBucketName
+
+
+  UploadBucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref ExecuteLambda
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Sub "arn:aws:s3:::${UploadBucketName}"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda_execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName: CloudwatchPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "logs:CreateLogGroup"
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      - PolicyName: S3Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+                - 's3:DeleteObject'
+                - 's3:GetObject'
+              Resource:
+                - !Sub "arn:aws:s3:::${UploadBucketName}/*"
+                - !Sub "arn:aws:s3:::${OutputBucketName}/*"
+
+  StatesTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: states_trigger_role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName: CloudwatchPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "logs:CreateLogGroup"
+              Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      - PolicyName: StatesStartExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'states:startExecution'
+              Resource: !Ref UploadStateMachine
+
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub 'states.${AWS::Region}.amazonaws.com'
+            Action:
+              - "sts:AssumeRole"
+
+  StatesExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: StatesExecutionPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: "lambda:InvokeFunction"
+            Resource: "*"
+      Roles:
+        - !Ref StatesExecutionRole
+
+  ExecuteLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: UploadStateMachine
+    Properties:
+      Description: Executes the Argomi upload state machine when an S3 file is uploaded
+      Handler: service.handler
+      Role: !GetAtt StatesTriggerRole.Arn
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: !Ref ExecuteLambdaS3Key
+      Timeout: 15
+      MemorySize: 128
+      Runtime: "python3.6"
+      Environment:
+        Variables:
+          STATEMACHINEARN: !Ref UploadStateMachine
+
+  InitializeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Initializes the import state machine
+      Handler: service.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: !Ref InitializeLambdaS3Key
+      Timeout: 30
+      MemorySize: 128
+      Runtime: "python3.6"
+      Environment:
+        Variables:
+          AMAAS_USERNAME: !Ref ArgomiUsername
+          AMAAS_PASSWORD: !Ref ArgomiPassword
+          ENVIRONMENT: !Ref Environment
+
+  ImportLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Imports data into Argomi from CSV files in S3
+      Handler: service.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: !Ref ImportLambdaS3Key
+      Timeout: 300
+      MemorySize: 512
+      Runtime: "python3.6"
+      Environment:
+        Variables:
+          AMAAS_USERNAME: !Ref ArgomiUsername
+          AMAAS_PASSWORD: !Ref ArgomiPassword
+          ENVIRONMENT: !Ref Environment
+
+  ExportLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Exports the current positions into a CSV file
+      Handler: service.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: !Ref ExportLambdaS3Key
+      Timeout: 120
+      MemorySize: 512
+      Runtime: "python3.6"
+      Environment:
+        Variables:
+          AMAAS_USERNAME: !Ref ArgomiUsername
+          AMAAS_PASSWORD: !Ref ArgomiPassword
+          ENVIRONMENT: !Ref Environment
+          OUTPUT_BUCKET: !Ref OutputBucketName
+
+  UploadStateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Import financial data into Argomi",
+              "StartAt": "Initialize State",
+              "States": {
+                "Initialize State": {
+                  "Type": "Task",
+                  "Resource": "${InitializeLambdaArn}",
+                  "Next": "Parties Setup"
+                },
+                "Parties Setup": {
+                  "Type": "Pass",
+                  "Result": "parties",
+                  "ResultPath": "$.import_type",
+                  "Next": "Parties Import"
+                },
+                "Parties Import": {
+                  "Type": "Task",
+                  "Resource": "${ImportLambdaArn}",
+                  "Next": "Books Setup"
+                },
+                "Books Setup": {
+                  "Type": "Pass",
+                  "Result": "books",
+                  "ResultPath": "$.import_type",
+                  "Next": "Books Import"
+                },
+                "Books Import": {
+                  "Type": "Task",
+                  "Resource": "${ImportLambdaArn}",
+                  "Next": "Transactions Setup"
+                },
+                "Transactions Setup": {
+                  "Type": "Pass",
+                  "Result": "transactions",
+                  "ResultPath": "$.import_type",
+                  "Next": "Transactions Import"
+                },
+                "Transactions Import": {
+                  "Type": "Task",
+                  "Resource": "${ImportLambdaArn}",
+                  "Next": "Resume Choice",
+                  "Retry": [
+                    {
+                      "ErrorEquals": ["States.Timeout", "States.TaskFailed"],
+                      "IntervalSeconds": 3,
+                      "MaxAttempts": 2,
+                      "BackoffRate": 1.5
+                    }
+                  ]
+                },
+                "Resume Choice": {
+                "Type" : "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.aborted",
+                    "BooleanEquals": true,
+                    "Next": "Transactions Import"
+                  }
+                ],
+                "Default": "Export"
+              },
+                "Export": {
+                  "Type": "Task",
+                  "Resource": "${ExportLambdaArn}",
+                  "End": true
+                }
+              }
+            }
+          - InitializeLambdaArn: !GetAtt [InitializeLambda, Arn]
+            ImportLambdaArn: !GetAtt [ImportLambda, Arn]
+            ExportLambdaArn: !GetAtt [ExportLambda, Arn]
+
+      RoleArn: !GetAtt [ StatesExecutionRole, Arn ]

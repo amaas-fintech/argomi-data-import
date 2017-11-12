@@ -1,0 +1,4 @@
+{
+  "s3_bucket": "argomi-uploads",
+  "s3_key": "data.zip"
+}

@@ -1,0 +1,7 @@
+{
+  "s3_bucket": "argomi-uploads",
+  "s3_key": "data.zip",
+  "import_type": "transactions",
+  "resume_index": 5,
+  "aborted": true
+}
